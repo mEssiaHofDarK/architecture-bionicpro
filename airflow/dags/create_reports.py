@@ -1,6 +1,7 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.operators.postgres import PostgresOperator
+from airflow.providers.clickhouse.operators.clickhouse import ClickHouseOperator
 from datetime import datetime
 import csv
 
@@ -34,37 +35,50 @@ def generate_insert_queries():
 
 
 # Определяем DAG
-with DAG('csv_to_postgres_dag',
+with DAG(dag_id="reports",
          default_args=default_args,  # аргументы по умолчанию в начале скрипта
-         schedule_interval='@once',  # запускаем один раз
+         schedule_interval="@hourly",  # запускаем один раз
          catchup=False) as dag:  # предотвращает повторное выполнение DAG для пропущенных расписаний.
 
-    # Создаём таблицу в PostgreSQL
-    create_table = PostgresOperator(
-        task_id='create_table',  # идентификатор задачи
-        postgres_conn_id='write_to_postgres',  # Название подключения
-        sql="""
-        DROP TABLE IF EXISTS sample_table;
-        CREATE TABLE sample_table (
-            id SERIAL PRIMARY KEY,
-            order_number BIGINT,
-            total NUMERIC(18,2),
-            discount NUMERIC(18,2),
-            buyer_id BIGINT
-        );
-        """
+    # get telemetry
+    get_telemetry = PostgresOperator(
+        task_id="get_telemetry",  # идентификатор задачи
+        postgres_conn_id="telemetry_db",  # Название подключения
+        sql="""select * from telemetry_table;"""
     )
-    # Опеределяем оператор для вставки данных
-    generate_queries = PythonOperator(
-        task_id='generate_insert_queries',
-        python_callable=generate_insert_queries
+    # get user data from crm
+    get_users = PostgresOperator(
+        task_id="get_users",
+        postgres_conn_id="users_db",
+        sql="""select * from users;"""
+    )
+    # combine data
+    # insert into clickhouse
+    insert_clickhouse = ClickHouseOperator(
+        task_id="insert_clickhouse",
+        clickhouse_conn_id="clickhouse_db",
+        sql="""""",
     )
 
-    # Запускаем выполнение оператора PostgresOperator
-    run_insert_queries = PostgresOperator(
-        task_id='run_insert_queries',
-        postgres_conn_id='write_to_postgres',  # Название подключения к PostgreSQL в Airflow UI
-        sql='sql/insert_queries.sql'
-    )
-    create_table >> generate_queries >> run_insert_queries
+
+
+    # get_telemetry >> get_users >> combine_data >> insert_clickhouse
+
+
+
+
+
+    # Опеределяем оператор для вставки данных
+    # generate_queries = PythonOperator(
+    #     task_id='generate_insert_queries',
+    #     python_callable=generate_insert_queries
+    # )
+    #
+    # # Запускаем выполнение оператора PostgresOperator
+    # run_insert_queries = PostgresOperator(
+    #     task_id='run_insert_queries',
+    #     postgres_conn_id='write_to_postgres',  # Название подключения к PostgreSQL в Airflow UI
+    #     sql='sql/insert_queries.sql'
+    # )
+    # create_table >> generate_queries >> run_insert_queries
     # Тут дальше можно продолжать пайплайн

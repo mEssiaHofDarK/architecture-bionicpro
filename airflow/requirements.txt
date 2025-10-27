@@ -1,1 +1,4 @@
 psycopg2-binary
+clickhouse-driver==0.2.9
+clickhouse-connect==0.9.2
+airflow-providers-clickhouse==0.0.1

@@ -68,8 +68,8 @@ services:
       context: ./api
       dockerfile: Dockerfile
     container_name: api
-#    environment:
-#      ...
+    environment:
+      CLICK_PASS: rouserthebest
     ports:
       - "8000:8000"
     networks:

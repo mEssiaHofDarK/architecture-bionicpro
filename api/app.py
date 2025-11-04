@@ -1,12 +1,13 @@
 import logging
 from aiohttp import web
-
-# from db.get_pool import pg_context
+from clickhouse_driver import Client
 
 
 class ReportsHandler(web.View):
     async def get(self):
-        return web.Response(text="i'am report")
+        client: Client = app["click_conn"]
+        data = client.execute("SELECT * FROM reports where user_id = %(user_id)s", {"user_id": self.request.query["user_id"]})
+        return web.Response(body=data)
 
 
 def add_routes(app: web.Application):
@@ -21,6 +22,6 @@ def add_routes(app: web.Application):
 if __name__ == "__main__":
     app = web.Application()
     logging.basicConfig(level=logging.INFO)
-    # app.cleanup_ctx.append(pg_context)
+    app["click_conn"] = Client("clickhouse:8123")
     add_routes(app=app)
     web.run_app(app, port=8000)

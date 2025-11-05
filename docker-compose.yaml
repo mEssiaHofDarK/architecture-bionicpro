@@ -139,11 +139,11 @@ services:
         condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
-    command: webserver
+    command: api-server
     networks:
       - my_network
     healthcheck:
-      test: [ "CMD-SHELL", "curl -f http://localhost:8080/health || exit 1" ]
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -164,6 +164,20 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
 
   airflow-triggerer:
     <<: *airflow-common
@@ -206,11 +220,24 @@ services:
     depends_on:
       airflow_meta_db:
         condition: service_healthy
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: true
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+      _AIRFLOW_WWW_USER_EMAIL: admin@example.com
+      _AIRFLOW_WWW_USER_FIRSTNAME: admin
+      _AIRFLOW_WWW_USER_LASTNAME: admin
     command: >
-      bash -c "airflow db init && airflow users create --username admin --firstname admin --lastname admin --role Admin --email admin@sample.ru --password admin"
+      bash -c "airflow db migrate"
     networks:
       - my_network
 
 networks:
   my_network:
     driver: bridge
+
+
+
+#curl -X POST http://<airflow-host>:8080/api/v1/users -H "Content-Type: application/json" -d '{"username": "newuser","email": "newuser@example.com","role_names": ["User"],"password": "securepassword"}'

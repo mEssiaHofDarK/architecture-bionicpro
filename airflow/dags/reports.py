@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-from airflow.providers.clickhouse.hooks.clickhouse import ClickHouseHook
+from airflow_clickhouse_plugin.hooks.clickhouse import ClickHouseHook
 from airflow.operators.python import PythonOperator
 from airflow.utils.timezone import convert_to_utc
 import pandas as pd
@@ -19,9 +19,8 @@ dag = DAG(
     'etl_postgres_to_clickhouse',
     default_args=default_args,
     description='ETL',
-    schedule_interval='@hourly',
+    schedule='@hourly',
     catchup=False,
-    tags=['etl', 'postgres', 'clickhouse'],
 )
 
 

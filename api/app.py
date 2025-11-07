@@ -1,14 +1,42 @@
 import logging
 import os
 from aiohttp import web
-from clickhouse_driver import Client
+import clickhouse_connect
+import jwt
+from typing import Callable, Awaitable
+import orjson
+import datetime
 
+
+@web.middleware
+async def mw_cors(request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]):
+    headers = {
+        'Access-Control-Allow-Origin': 'http://localhost:3000',
+        'Access-Control-Allow-Headers': 'Authorization, Content-Type'
+    }
+    if request.method == 'OPTIONS':
+        return web.Response(status=200, headers=headers)
+    resp = await handler(request)
+    return resp
 
 class ReportsHandler(web.View):
-    async def get(self):
-        client: Client = app["click_conn"]
-        data = client.execute("SELECT * FROM reports where user_id = %(user_id)s", {"user_id": self.request.query["user_id"]})
-        return web.json_response(data)
+    def get_user_id_from_jwt(self):
+        token = self.request.headers.get('Authorization')
+        dtoken = jwt.decode(token.replace('Bearer ', ''), options={"verify_signature": False})
+        return dtoken["sub"]
+
+    async def get(self) -> web.Response:
+        headers = {
+            'Access-Control-Allow-Origin': 'http://localhost:3000',
+            'Access-Control-Allow-Headers': 'Authorization, Content-Type'
+        }
+        user_id = self.get_user_id_from_jwt()
+        client: clickhouse_connect.driver.Client = app["click_conn"]
+        data = client.query(f"select * from reports where user_id = '{user_id}'")
+        logging.info(f"{data = }")
+        logging.info(f"{data.result_rows = }")
+        resp = orjson.dumps(data.result_rows)
+        return web.Response(body=resp, headers=headers)
 
 
 def add_routes(app: web.Application):
@@ -21,14 +49,14 @@ def add_routes(app: web.Application):
 
 
 if __name__ == "__main__":
-    app = web.Application()
+    app = web.Application(middlewares=[mw_cors])
     logging.basicConfig(level=logging.INFO)
-    app["click_conn"] = Client(
+    client = clickhouse_connect.get_client(
         host="clickhouse",
-        port=8123,
-        user="user_ro",
+        username="admin",
         password=os.environ.get("CLICK_PASS"),
-        database="main_db"
     )
+    # client = Client(f'clickhouse://admin:{os.environ.get("CLICK_PASS")}@localhost')
+    app["click_conn"] = client
     add_routes(app=app)
     web.run_app(app, port=8000)

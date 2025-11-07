@@ -57,6 +57,7 @@ services:
     container_name: clickhouse
     ports:
       - "8123:8123"
+      - "9000:9000"
     volumes:
       - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/users.xml
       - ./clickhouse/db/init-db.sql:/docker-entrypoint-initdb.d/db.sql
@@ -69,7 +70,7 @@ services:
       dockerfile: Dockerfile
     container_name: api
     environment:
-      CLICK_PASS: rouserthebest
+      CLICK_PASS: turboadmin
     ports:
       - "8000:8000"
     networks:

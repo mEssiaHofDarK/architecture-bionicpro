@@ -1,18 +1,17 @@
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-from airflow_clickhouse_plugin.hooks.clickhouse import ClickHouseHook
 from airflow.operators.python import PythonOperator
-from airflow.utils.timezone import convert_to_utc
+import clickhouse_connect
 import pandas as pd
 
 # Параметры DAG
 default_args = {
     'owner': 'data_engineer',
     'depends_on_past': False,
-    'start_date': datetime(2025, 11, 5),
+    'start_date': datetime(2025, 11, 1),
     'retries': 1,
-    'retry_delay': timedelta(minutes=5),
+    'retry_delay': timedelta(seconds=15),
 }
 
 dag = DAG(
@@ -21,37 +20,31 @@ dag = DAG(
     description='ETL',
     schedule='@hourly',
     catchup=False,
+    max_active_runs=1,
+    max_active_tasks=1,
 )
 
 
 def extract_from_telemetry_pg(**context):
-    execution_date = context['execution_date']
-    end_time = convert_to_utc(execution_date)
-    start_time = end_time - timedelta(hours=1)
     sql = f"""
         select user_id,
                telemetry,
-               now() as date
+               date
         from telemetry
-        where created_at between '{start_time}' and '{end_time}'
     """
-    hook = PostgresHook(postgres_conn_id='telemetry_db')
-    conn = hook.get_conn()
-    df = pd.read_sql(sql, conn)
-    conn.close()
+    with PostgresHook(postgres_conn_id='telemetry_db').get_conn() as conn:
+        df = pd.read_sql(sql, conn)
     return df
 
 
 def extract_from_users_pg(**context):
     sql = f"""
-        select id as user_id, 
+        select user_id, 
                name
         from users
     """
-    hook = PostgresHook(postgres_conn_id='users_db')
-    conn = hook.get_conn()
-    df = pd.read_sql(sql, conn)
-    conn.close()
+    with PostgresHook(postgres_conn_id='users_db').get_conn() as conn:
+        df = pd.read_sql(sql, conn)
     return df
 
 
@@ -64,8 +57,15 @@ def merge_data(**context):
 
 def load_to_clickhouse(**context):
     df = context['task_instance'].xcom_pull(task_ids='merge_data')
-    hook = ClickHouseHook(clickhouse_conn_id='clickhouse_db')
-    hook.insert_dataframe(df, 'combined_data')
+    prepared_data = [list(row.values()) for row in df.to_dict('records')]
+    for item in prepared_data:
+        print(item)
+    client = clickhouse_connect.get_client(
+        host="clickhouse",
+        username="admin",
+        password="turboadmin",
+    )
+    client.insert(table='reports', data=prepared_data, column_names=['user_id', 'telemetry', 'date', 'name'])
 
 
 extract_1 = PythonOperator(

@@ -31,7 +31,7 @@ services:
     volumes:
       - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json
     ports:
-      - "8080:8080"
+      - "8081:8080"
     depends_on:
       - keycloak_db
     networks:
@@ -46,7 +46,7 @@ services:
       - "3000:3000"
     environment:
       REACT_APP_API_URL: http://localhost:8000
-      REACT_APP_KEYCLOAK_URL: http://localhost:8080
+      REACT_APP_KEYCLOAK_URL: http://localhost:8081
       REACT_APP_KEYCLOAK_REALM: reports-realm
       REACT_APP_KEYCLOAK_CLIENT_ID: reports-frontend
     networks:
@@ -82,15 +82,19 @@ services:
       dockerfile: Dockerfile
     environment: &airflow-common-env
       AIRFLOW__CORE__EXECUTOR: LocalExecutor #локальный запуск
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-webserver:8080/execution/'
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow_meta_db/airflow
       AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow_meta_db/airflow
       AIRFLOW__CORE__FERNET_KEY: ''
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+#      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+      AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
       AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
       AIRFLOW__WEBSERVER__SECRET_KEY: 'your_airflow_webserver_sec_key'
       _PIP_ADDITIONAL_REQUIREMENTS: ''
+#      AIRFLOW__API__SECRET_KEY: 'awsome'
+      AIRFLOW__API_AUTH__JWT_SECRET: 'superawsome'
       AIRFLOW_INPUT_DIR: '/opt/airflow/dag-inputs'
     volumes:
       - ./airflow/dags:/opt/airflow/dags
@@ -134,7 +138,9 @@ services:
     <<: *airflow-common
     container_name: airflow_web
     ports:
-      - "8081:8080"
+      - "8080:8080"
+    environment:
+      <<: *airflow-common-env
     depends_on:
       airflow_meta_db:
         condition: service_healthy
@@ -148,12 +154,15 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 30s
 
   airflow-scheduler:
     <<: *airflow-common
     container_name: airflow_sch
     networks:
       - my_network
+    environment:
+      <<: *airflow-common-env
     command: scheduler
     depends_on:
       airflow_meta_db:
@@ -161,14 +170,17 @@ services:
       airflow-webserver:
         condition: service_healthy
     healthcheck:
-      test: [ "CMD-SHELL", "curl -f http://localhost:8080/health || exit 1" ]
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 30s
 
   airflow-dag-processor:
     <<: *airflow-common
     command: dag-processor
+    environment:
+      <<: *airflow-common-env
     healthcheck:
       test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
       interval: 30s
@@ -190,6 +202,8 @@ services:
         condition: service_completed_successfully
     networks:
       - my_network
+    environment:
+      <<: *airflow-common-env
     command: bash -c "airflow triggerer"
     healthcheck:
       test:
@@ -232,6 +246,62 @@ services:
       _AIRFLOW_WWW_USER_LASTNAME: admin
     command: >
       bash -c "airflow db migrate"
+    networks:
+      - my_network
+
+  telemetry_db:
+    image: postgres:16.0
+    container_name: telemetry_db
+    volumes:
+      - ./data_db/telemetry/init-db.sql:/docker-entrypoint-initdb.d/db.sql
+    environment:
+      POSTGRES_USER: telemetry
+      POSTGRES_PASSWORD: telemetry
+      POSTGRES_DB: telemetry
+    ports:
+      - "5444:5432"
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD
+        - pg_isready
+        - -U
+        - telemetry
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+    networks:
+      - my_network
+
+  users_db:
+    image: postgres:16.0
+    container_name: users_db
+    volumes:
+      - ./data_db/users/init-db.sql:/docker-entrypoint-initdb.d/db.sql
+    environment:
+      POSTGRES_USER: users
+      POSTGRES_PASSWORD: users
+      POSTGRES_DB: users
+    ports:
+      - "5445:5432"
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD
+        - pg_isready
+        - -U
+        - users
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
     networks:
       - my_network
 

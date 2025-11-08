@@ -3,6 +3,7 @@ version: '3.8'
 services:
   keycloak_db:
     image: postgres:14
+    container_name: keycloack_db
     environment:
       POSTGRES_DB: keycloak_db
       POSTGRES_USER: keycloak_user
@@ -11,8 +12,12 @@ services:
       - ./postgres-keycloak-data:/var/lib/postgresql/data
     ports:
       - "5433:5432"
+    networks:
+      - my_network
+
   keycloak:
     image: quay.io/keycloak/keycloak:21.1
+    container_name: keycloak
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
@@ -26,17 +31,284 @@ services:
     volumes:
       - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json
     ports:
-      - "8080:8080"
+      - "8081:8080"
     depends_on:
       - keycloak_db
+    networks:
+      - my_network
+
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    container_name: frontend
     ports:
       - "3000:3000"
     environment:
       REACT_APP_API_URL: http://localhost:8000
-      REACT_APP_KEYCLOAK_URL: http://localhost:8080
+      REACT_APP_KEYCLOAK_URL: http://localhost:8081
       REACT_APP_KEYCLOAK_REALM: reports-realm
       REACT_APP_KEYCLOAK_CLIENT_ID: reports-frontend
+    networks:
+      - my_network
+
+  clickhouse:
+    image: yandex/clickhouse-server
+    container_name: clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/users.xml
+      - ./clickhouse/db/init-db.sql:/docker-entrypoint-initdb.d/db.sql
+    networks:
+      - my_network
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: api
+    environment:
+      CLICK_PASS: turboadmin
+    ports:
+      - "8000:8000"
+    networks:
+      - my_network
+
+  x-airflow-common: &airflow-common
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    environment: &airflow-common-env
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor #локальный запуск
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-webserver:8080/execution/'
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow_meta_db/airflow
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow_meta_db/airflow
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+#      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+      AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+      AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+      AIRFLOW__WEBSERVER__SECRET_KEY: 'your_airflow_webserver_sec_key'
+      _PIP_ADDITIONAL_REQUIREMENTS: ''
+#      AIRFLOW__API__SECRET_KEY: 'awsome'
+      AIRFLOW__API_AUTH__JWT_SECRET: 'superawsome'
+      AIRFLOW_INPUT_DIR: '/opt/airflow/dag-inputs'
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/dags/sql:/opt/airflow/dags/sql
+      - ./airflow/requirements.txt:/opt/airflow/requirements.txt
+      - ./airflow/data:/opt/airflow/sample_files
+    user: "${AIRFLOW_UID:-50000}:0"
+    depends_on: &airflow-common-depends-on
+      airflow_meta_db:
+        condition: service_healthy
+    networks:
+      - my_network
+
+  airflow_meta_db:
+    image: postgres:16.0
+    container_name: airflow_db
+    volumes:
+      - ./airflow/db/init-db.sql:/docker-entrypoint-initdb.d/db.sql
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD
+        - pg_isready
+        - -U
+        - airflow
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+    networks:
+      - my_network
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow_web
+    ports:
+      - "8080:8080"
+    environment:
+      <<: *airflow-common-env
+    depends_on:
+      airflow_meta_db:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: api-server
+    networks:
+      - my_network
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow_sch
+    networks:
+      - my_network
+    environment:
+      <<: *airflow-common-env
+    command: scheduler
+    depends_on:
+      airflow_meta_db:
+        condition: service_healthy
+      airflow-webserver:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    environment:
+      <<: *airflow-common-env
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: airflow_trg
+    depends_on:
+      airflow_meta_db:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - my_network
+    environment:
+      <<: *airflow-common-env
+    command: bash -c "airflow triggerer"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - airflow jobs check --job-type TriggererJob --hostname "${HOSTNAME}"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+
+  airflow-cli:
+    <<: *airflow-common
+    container_name: airflow_cli
+    depends_on:
+      airflow_meta_db:
+        condition: service_healthy
+    networks:
+      - my_network
+    profiles:
+      - debug
+    command:
+      - bash
+      - -c
+      - airflow
+
+  airflow-init:
+    <<: *airflow-common
+    depends_on:
+      airflow_meta_db:
+        condition: service_healthy
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: true
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+      _AIRFLOW_WWW_USER_EMAIL: admin@example.com
+      _AIRFLOW_WWW_USER_FIRSTNAME: admin
+      _AIRFLOW_WWW_USER_LASTNAME: admin
+    command: >
+      bash -c "airflow db migrate"
+    networks:
+      - my_network
+
+  telemetry_db:
+    image: postgres:16.0
+    container_name: telemetry_db
+    volumes:
+      - ./data_db/telemetry/init-db.sql:/docker-entrypoint-initdb.d/db.sql
+    environment:
+      POSTGRES_USER: telemetry
+      POSTGRES_PASSWORD: telemetry
+      POSTGRES_DB: telemetry
+    ports:
+      - "5444:5432"
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD
+        - pg_isready
+        - -U
+        - telemetry
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+    networks:
+      - my_network
+
+  users_db:
+    image: postgres:16.0
+    container_name: users_db
+    volumes:
+      - ./data_db/users/init-db.sql:/docker-entrypoint-initdb.d/db.sql
+    environment:
+      POSTGRES_USER: users
+      POSTGRES_PASSWORD: users
+      POSTGRES_DB: users
+    ports:
+      - "5445:5432"
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD
+        - pg_isready
+        - -U
+        - users
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+    networks:
+      - my_network
+
+networks:
+  my_network:
+    driver: bridge
+
+
+
+#curl -X POST http://<airflow-host>:8080/api/v1/users -H "Content-Type: application/json" -d '{"username": "newuser","email": "newuser@example.com","role_names": ["User"],"password": "securepassword"}'
